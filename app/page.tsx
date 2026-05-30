@@ -1,13 +1,6 @@
 "use client"
 
-import dynamic from "next/dynamic"
-
-const BracketDemo = dynamic(
-  () => import("../components/bracket-demo").then((module) => module.BracketDemo),
-  {
-    ssr: false,
-  }
-)
+import { BracketDemo } from "../components/bracket-demo"
 
 export default function Home() {
   return (

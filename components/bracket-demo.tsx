@@ -1,7 +1,8 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useMemo, useState } from "react"
 import { BracketsManager } from "brackets-manager"
+import { InMemoryDatabase } from "brackets-memory-db"
 import { ChevronRight, Play, Trophy, Users } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -23,9 +24,26 @@ type DemoSummary = {
   matchCount: number
 }
 
-type TableName = "participant" | "stage" | "group" | "round" | "match" | "match_game"
+type BracketData = Awaited<ReturnType<typeof manager.export>>
 
-const teams = [
+type BracketMatch = {
+  id: number
+  number: number
+  state: number
+  opponent1: string
+  opponent2: string
+  score1: number | string
+  score2: number | string
+  winnerSide: "opponent1" | "opponent2" | null
+}
+
+type BracketColumn = {
+  title: string
+  subtitle: string
+  matches: BracketMatch[]
+}
+
+const completedTop8Teams = [
   "Atlas",
   "Beacon",
   "Comet",
@@ -36,84 +54,21 @@ const teams = [
   "Harbor",
 ]
 
-function createMemoryStorage() {
-  const tables: Record<TableName, any[]> = {
-    participant: [],
-    stage: [],
-    group: [],
-    round: [],
-    match: [],
-    match_game: [],
-  }
+const completedMatchResults = [
+  { id: 0, opponent1: { score: 3, result: "win" }, opponent2: { score: 1 } },
+  { id: 1, opponent1: { score: 2, result: "win" }, opponent2: { score: 0 } },
+  { id: 2, opponent1: { score: 1 }, opponent2: { score: 2, result: "win" } },
+  { id: 3, opponent1: { score: 4, result: "win" }, opponent2: { score: 2 } },
+  { id: 4, opponent1: { score: 2, result: "win" }, opponent2: { score: 1 } },
+  { id: 5, opponent1: { score: 1 }, opponent2: { score: 2, result: "win" } },
+  { id: 6, opponent1: { score: 3 }, opponent2: { score: 4, result: "win" } },
+]
 
-  const clone = <T,>(value: T): T => {
-    if (typeof structuredClone === "function") return structuredClone(value)
-    return JSON.parse(JSON.stringify(value)) as T
-  }
-
-  const getTable = (table: TableName) => tables[table]
-
-  const matchesFilter = (record: Record<string, any>, filter: any) => {
-    if (filter === undefined) return true
-    if (typeof filter === "number") return record.id === filter
-    if (Array.isArray(filter)) return filter.includes(record.id)
-
-    return Object.entries(filter).every(([key, value]) => record[key] === value)
-  }
-
-  const insertOne = (table: TableName, row: Record<string, any>) => {
-    const nextId = row.id ?? (getTable(table).at(-1)?.id ?? -1) + 1
-    const record = { ...clone(row), id: nextId }
-    getTable(table).push(record)
-    return nextId
-  }
-
-  return {
-    async select(table: TableName, filter?: any) {
-      const rows = getTable(table).filter((record) => matchesFilter(record, filter))
-      if (filter === undefined) return clone(rows)
-      if (typeof filter === "number") return clone(rows[0] ?? null)
-      if (Array.isArray(filter)) return clone(rows)
-      return clone(rows)
-    },
-    async insert(table: TableName, data: any) {
-      if (Array.isArray(data)) return data.map((row) => insertOne(table, row))
-      return insertOne(table, data)
-    },
-    async update(table: TableName, data: any) {
-      if (Array.isArray(data)) {
-        data.forEach((row) => {
-          const index = getTable(table).findIndex((record) => record.id === row.id)
-          if (index >= 0) getTable(table)[index] = { ...getTable(table)[index], ...clone(row) }
-        })
-
-        return true
-      }
-
-      const index = getTable(table).findIndex((record) => record.id === data.id)
-      if (index >= 0) getTable(table)[index] = { ...getTable(table)[index], ...clone(data) }
-      return true
-    },
-    async delete(table: TableName, filter?: any) {
-      if (filter === undefined) {
-        tables[table] = []
-        return true
-      }
-
-      tables[table] = getTable(table).filter((record) => !matchesFilter(record, filter))
-      return true
-    },
-    async reset() {
-      for (const table of Object.keys(tables) as TableName[]) tables[table] = []
-    },
-  }
-}
-
-const storage = createMemoryStorage()
-const manager = new BracketsManager(storage as never)
+const storage = new InMemoryDatabase()
+const manager = new BracketsManager(storage)
+const teams = completedTop8Teams
 
 function BracketDemo() {
-  const containerRef = useRef<HTMLDivElement | null>(null)
   const [refreshIndex, setRefreshIndex] = useState(0)
   const [summary, setSummary] = useState<DemoSummary>({
     participantCount: 0,
@@ -121,6 +76,7 @@ function BracketDemo() {
     roundCount: 0,
     matchCount: 0,
   })
+  const [bracketData, setBracketData] = useState<BracketData | null>(null)
   const [message, setMessage] = useState("Building bracket simulation...")
   const [error, setError] = useState<string | null>(null)
 
@@ -132,17 +88,25 @@ function BracketDemo() {
       setError(null)
 
       try {
-        await storage.reset()
+        storage.reset()
 
         await manager.create.stage({
           name: "Bracket demo",
           tournamentId: 0,
           type: "single_elimination",
-          seeding: teams,
+          seeding: completedTop8Teams,
           settings: {
             seedOrdering: ["natural"],
           },
         })
+
+        for (const result of completedMatchResults) {
+          await manager.update.match({
+            id: result.id,
+            opponent1: result.opponent1,
+            opponent2: result.opponent2,
+          })
+        }
 
         const data = await manager.export()
 
@@ -154,19 +118,8 @@ function BracketDemo() {
           roundCount: data.round.length,
           matchCount: data.match.length,
         })
+        setBracketData(data)
         setMessage("Live bracket simulation ready")
-
-        const { BracketsViewer } = await import("brackets-viewer")
-        const viewer = new BracketsViewer()
-
-        if (containerRef.current) {
-          containerRef.current.innerHTML = ""
-          await viewer.render({
-            stages: data.stage,
-            matches: data.match,
-            matchGames: data.match_game,
-          })
-        }
       } catch (err) {
         if (cancelled) return
 
@@ -182,6 +135,48 @@ function BracketDemo() {
       cancelled = true
     }
   }, [refreshIndex])
+
+  const rounds = useMemo(() => {
+    if (!bracketData) return []
+
+    const participantById = new Map(bracketData.participant.map((participant) => [participant.id, participant]))
+    const matchesByRound = new Map<number, typeof bracketData.match>()
+
+    for (const match of bracketData.match) {
+      const roundId = match.round_id
+      const current = matchesByRound.get(roundId) ?? []
+      current.push(match)
+      matchesByRound.set(roundId, current)
+    }
+
+    return bracketData.round
+      .slice()
+      .sort((left, right) => left.number - right.number)
+      .map((round) => ({
+        round,
+        matches: (matchesByRound.get(round.id) ?? []).slice().sort((left, right) => left.number - right.number),
+        participantById,
+      }))
+  }, [bracketData])
+
+  const bracketColumns = useMemo(() => {
+    if (rounds.length === 0) return []
+
+    return rounds.map(({ round, matches, participantById }, index, allRounds): BracketColumn => ({
+      title: round.number === 1 ? "Quarterfinals" : round.number === allRounds.length ? "Final" : `Round ${round.number}`,
+      subtitle: `${matches.length} match${matches.length === 1 ? "" : "es"}`,
+      matches: matches.map((match) => ({
+        id: match.id,
+        number: match.number,
+        state: match.status,
+        opponent1: typeof match.opponent1?.id === "number" ? participantById.get(match.opponent1.id)?.name ?? `Team ${match.opponent1.id + 1}` : "BYE",
+        opponent2: typeof match.opponent2?.id === "number" ? participantById.get(match.opponent2.id)?.name ?? `Team ${match.opponent2.id + 1}` : "BYE",
+        score1: match.opponent1?.score ?? "—",
+        score2: match.opponent2?.score ?? "—",
+        winnerSide: match.opponent1?.result === "win" ? "opponent1" : match.opponent2?.result === "win" ? "opponent2" : null,
+      })),
+    }))
+  }, [rounds])
 
   return (
     <main className="relative min-h-dvh overflow-hidden bg-[radial-gradient(circle_at_top_left,_var(--color-primary)/10,_transparent_42%),radial-gradient(circle_at_top_right,_var(--color-accent)/14,_transparent_36%),linear-gradient(to_bottom,_var(--color-background),color-mix(in_oklch,var(--color-background),var(--color-foreground)_3%))] text-foreground">
@@ -249,7 +244,7 @@ function BracketDemo() {
                   </div>
                   <div className="rounded-2xl border border-border/60 bg-background/70 p-3">
                     <div className="text-muted-foreground">Teams</div>
-                    <div className="mt-1 text-lg font-medium">{teams.length}</div>
+                    <div className="mt-1 text-lg font-medium">{completedTop8Teams.length}</div>
                   </div>
                 </div>
 
@@ -275,28 +270,99 @@ function BracketDemo() {
             </Card>
           </div>
 
-          <Card className="min-h-[42rem]">
-            <CardHeader className="border-b border-border/60">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <CardTitle>Bracket live</CardTitle>
-                  <CardDescription>Le viewer s&apos;attache à un conteneur vide et le remplit après montage.</CardDescription>
-                </div>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <ChevronRight className="size-4" />
-                  {message}
-                </div>
+          <div className="min-h-[42rem] rounded-[2rem] border border-border/70 bg-background/75 shadow-sm backdrop-blur">
+            <div className="flex items-center justify-between border-b border-border/60 px-5 py-4">
+              <div>
+                <h2 className="text-lg font-semibold">Bracket live</h2>
+                <p className="text-sm text-muted-foreground">Version plus compacte avec lignes de transition et scores à droite.</p>
               </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-hidden p-3">
-                <div
-                  ref={containerRef}
-                  className="brackets-viewer min-h-[34rem] rounded-[1.5rem] border border-border/60 bg-background/90 p-4"
-                />
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <ChevronRight className="size-4" />
+                {message}
               </div>
-            </CardContent>
-          </Card>
+            </div>
+
+            <div className="overflow-x-auto p-5">
+              <div className="min-h-[34rem] rounded-[1.5rem] border border-border/60 bg-background/90 p-4">
+                {error ? (
+                  <div className="flex min-h-[28rem] items-center justify-center rounded-[1.25rem] border border-dashed border-border/60 bg-muted/30 p-6 text-sm text-muted-foreground">
+                    {error}
+                  </div>
+                ) : bracketColumns.length === 0 ? (
+                  <div className="flex min-h-[28rem] items-center justify-center rounded-[1.25rem] border border-dashed border-border/60 bg-muted/30 p-6 text-sm text-muted-foreground">
+                    {message}
+                  </div>
+                ) : (
+                  <div className="flex min-w-max gap-8">
+                    {bracketColumns.map((column, columnIndex) => {
+                      const isLastColumn = columnIndex === bracketColumns.length - 1
+
+                      return (
+                        <section key={column.title} className="flex w-[20rem] flex-col gap-4">
+                          <div className="flex items-end justify-between border-b border-border/60 pb-2">
+                            <div>
+                              <div className="text-sm font-semibold uppercase tracking-[0.2em] text-muted-foreground">{column.title}</div>
+                              <div className="text-xs text-muted-foreground">{column.subtitle}</div>
+                            </div>
+                            <div className="text-xs text-muted-foreground">{columnIndex + 1}/{bracketColumns.length}</div>
+                          </div>
+
+                          <div className="flex flex-col gap-5">
+                            {column.matches.map((match, matchIndex) => {
+                              const showConnector = !isLastColumn
+                              const winnerOne = match.winnerSide === "opponent1"
+                              const winnerTwo = match.winnerSide === "opponent2"
+
+                              return (
+                                <article
+                                  key={match.id}
+                                  className="relative rounded-2xl border border-border/60 bg-card px-3 py-3 shadow-sm"
+                                >
+                                  <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+                                    <span>Match {match.number}</span>
+                                    <span>Finished</span>
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <Fragment>
+                                      <div className={`grid grid-cols-[minmax(0,1fr)_3.5rem] items-center gap-3 rounded-xl border px-3 py-2 ${winnerOne ? "border-primary/60 bg-primary/10" : "border-border/60 bg-background/80"}`}>
+                                        <span className="truncate text-sm font-medium">{match.opponent1}</span>
+                                        <span className="rounded-lg border border-border/60 bg-muted/50 px-2 py-1 text-center text-sm font-semibold tabular-nums text-muted-foreground">{match.score1}</span>
+                                      </div>
+                                      <div className="relative flex items-center py-1.5">
+                                        <div className="h-px w-4 bg-border" />
+                                        <div className="h-4 border-l border-border/80" />
+                                        <div className="h-px flex-1 bg-border" />
+                                      </div>
+                                      <div className={`grid grid-cols-[minmax(0,1fr)_3.5rem] items-center gap-3 rounded-xl border px-3 py-2 ${winnerTwo ? "border-primary/60 bg-primary/10" : "border-border/60 bg-background/80"}`}>
+                                        <span className="truncate text-sm font-medium">{match.opponent2}</span>
+                                        <span className="rounded-lg border border-border/60 bg-muted/50 px-2 py-1 text-center text-sm font-semibold tabular-nums text-muted-foreground">{match.score2}</span>
+                                      </div>
+                                    </Fragment>
+                                  </div>
+
+                                  {showConnector ? (
+                                    <div className="pointer-events-none absolute right-[-2rem] top-1/2 flex items-center">
+                                      <div className="h-px w-8 bg-border/80" />
+                                      <div className="h-4 border-l border-border/80" />
+                                    </div>
+                                  ) : null}
+
+                                  {matchIndex !== column.matches.length - 1 ? (
+                                    <div className="pointer-events-none absolute right-[-2rem] bottom-[-1.375rem] h-5 w-8 border-r border-b border-border/70" />
+                                  ) : null}
+                                </article>
+                              )
+                            })}
+                          </div>
+                        </section>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         </section>
       </div>
     </main>
